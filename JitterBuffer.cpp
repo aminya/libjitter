@@ -8,7 +8,7 @@ using namespace std::chrono;
 const std::size_t METADATA_SIZE = sizeof(std::int64_t);
 // const std::size_t METADATA_SIZE = 0;
 
-JitterBuffer::JitterBuffer(std::size_t element_size, std::uint32_t clock_rate, milliseconds min_length, milliseconds max_length)
+JitterBuffer::JitterBuffer(std::size_t element_size, std::uint32_t clock_rate, milliseconds max_length, milliseconds min_length)
     : element_size(element_size),
       clock_rate(clock_rate),
       min_length(min_length),
