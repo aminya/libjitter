@@ -21,13 +21,14 @@ TEST_CASE("libjitter_implementation::enqueue") {
   packets.push_back(packet);
   const std::size_t enqueued = buffer.Enqueue(
           packets,
-          [](const std::vector<Packet> &packets) {},
-          [](const std::vector<Packet> &packets) {});
+          [](const std::vector<Packet> &) {},
+          [](const std::vector<Packet> &) {});
   CHECK_EQ(enqueued, packet.elements);
 
   // Check internals of buffer.
   const std::size_t expected_bytes = packet.elements * frame_size + JitterBuffer::METADATA_SIZE;
   CHECK_EQ(0, memcmp(packet.data, buffer.GetReadPointerAtPacketOffset(0), frame_size * frames_per_packet));
+  free(packet.data);
   CHECK_EQ(expected_bytes, inspector.GetWritten());
   CHECK_EQ(0, inspector.GetReadOffset());
   CHECK_EQ(expected_bytes, inspector.GetWriteOffset());
@@ -44,10 +45,10 @@ TEST_CASE("libjitter_implementation::concealment") {
   sequence1Packets.push_back(sequence1);
   const std::size_t enqueued1 = buffer.Enqueue(
           sequence1Packets,
-          [](const std::vector<Packet> &packets) {
+          [](const std::vector<Packet> &) {
             FAIL("Expected no callback");
           },
-          [](const std::vector<Packet> &packets) {
+          [](const std::vector<Packet> &) {
             FAIL("Expected no callback");
           });
   CHECK_EQ(enqueued1, sequence1.elements);
@@ -66,7 +67,7 @@ TEST_CASE("libjitter_implementation::concealment") {
             for (auto& packet : packets) {
               CHECK_EQ(expected_sequence, packet.sequence_number);
               expected_sequence++;
-              packet.data = malloc(frame_size * frames_per_packet);
+              packet.data = calloc(frame_size * frames_per_packet, 1);
               memset(packet.data, packet.sequence_number, frame_size * frames_per_packet);
               packet.length = frame_size * frames_per_packet;
               packet.elements = frames_per_packet;
@@ -74,7 +75,7 @@ TEST_CASE("libjitter_implementation::concealment") {
               expected_enqueued += packet.elements;
             }
           },
-          [sequence1, sequence4, frame_size, frames_per_packet, &concealment_packets](std::vector<Packet> &packets) {
+          [sequence1, sequence4, &concealment_packets](std::vector<Packet> &packets) {
             CHECK_EQ(packets.capacity(), sequence4.sequence_number - sequence1.sequence_number - 1);
             for (Packet& packet : packets) {
               const Packet created = concealment_packets.at(packet.sequence_number);
@@ -108,13 +109,14 @@ TEST_CASE("libjitter_implementation::update_existing") {
     packets.push_back(packet);
     const std::size_t enqueued = buffer.Enqueue(
             packets,
-            [](const std::vector<Packet> &packets) {
+            [](const std::vector<Packet> &) {
               FAIL("Unexpected concealment");
             },
-            [](const std::vector<Packet> &packets) {
+            [](const std::vector<Packet> &) {
               FAIL("Unexpected free");
             });
     CHECK_EQ(enqueued, packet.elements);
+    free(packet.data);
   }
 
   // Push 3.
@@ -128,7 +130,7 @@ TEST_CASE("libjitter_implementation::update_existing") {
             [&concealment_enqueue](std::vector<Packet> &packets) {
               CHECK_EQ(packets.capacity(), 1);
               CHECK_EQ(packets[0].sequence_number, 2);
-              packets[0].data = malloc(packets[0].length);
+              packets[0].data = calloc(packets[0].length, 1);
               memset(packets[0].data, 2, packets[0].length);
               concealment_enqueue += packets[0].length / frame_size;
             },
@@ -138,6 +140,7 @@ TEST_CASE("libjitter_implementation::update_existing") {
               free(packets[0].data);
             });
     CHECK_EQ(enqueued3, packet3.elements + concealment_enqueue);
+    free(packet3.data);
   }
 
   // Now update 2.
@@ -148,10 +151,10 @@ TEST_CASE("libjitter_implementation::update_existing") {
     updatePackets.push_back(updatePacket);
     const std::size_t enqueued = buffer.Enqueue(
             updatePackets,
-            [](const std::vector<Packet> &packets) {
+            [](const std::vector<Packet> &) {
               FAIL("Unexpected concealment");
             },
-            [](const std::vector<Packet> &packets) {
+            [](const std::vector<Packet> &) {
               FAIL("Unexpected free");
             });
     // FIXME: This fails because of bad backwards search.
@@ -160,6 +163,7 @@ TEST_CASE("libjitter_implementation::update_existing") {
 
   // Now inspect the buffer to make sure that the correct packet has been updated.
   CHECK(checkPacketInSlot(&buffer, updatePacket, 1));
+  free(updatePacket.data);
 }
 
 TEST_CASE("libjitter_implementation::checkPacketInSlot") {
@@ -173,10 +177,10 @@ TEST_CASE("libjitter_implementation::checkPacketInSlot") {
   packets.push_back(packet);
   const std::size_t enqueued = buffer.Enqueue(
           packets,
-          [](const std::vector<Packet> &packets) {
+          [](const std::vector<Packet> &) {
             FAIL("Unexpected concealment");
           },
-          [](const std::vector<Packet> &packets) {
+          [](const std::vector<Packet> &) {
             FAIL("Unexpected free");
           });
   CHECK_EQ(enqueued, packet.elements);
@@ -189,6 +193,7 @@ TEST_CASE("libjitter_implementation::checkPacketInSlot") {
   CHECK_EQ(retrieved.sequence_number, packet.sequence_number);
   CHECK_EQ(retrieved.elements, packet.elements);
   CHECK_EQ(0, memcmp(read, packet.data, packet.length));
+  free(packet.data);
 }
 
 TEST_CASE("libjitter_implementation::run") {
@@ -197,7 +202,7 @@ TEST_CASE("libjitter_implementation::run") {
     for (std::size_t index = 0; index < 1000; index++) {
       auto packet = Packet {
         .sequence_number = index,
-        .data = malloc(sizeof(std::size_t)),
+        .data = calloc(1, sizeof(std::size_t)),
         .length = sizeof(std::size_t),
         .elements = 1,
       };
@@ -213,10 +218,11 @@ TEST_CASE("libjitter_implementation::run") {
 
   std::thread dequeue([&buffer](){
     for (std::size_t index = 0; index < 1000; index++) {
-      auto* destination = static_cast<std::uint8_t*>(malloc(sizeof(std::size_t)));
+      auto* destination = static_cast<std::uint8_t*>(calloc(1, sizeof(std::size_t)));
       const std::size_t dequeued = buffer.Dequeue(destination, sizeof(std::size_t), 1);
       REQUIRE((dequeued == 0 || dequeued == 1));
       std::this_thread::sleep_for(microseconds(10));
+      free(destination);
     }
   });
 
