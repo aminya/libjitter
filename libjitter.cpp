@@ -46,7 +46,7 @@ size_t JitterDequeue(void *libjitter,
     return buffer->Dequeue((std::uint8_t *) destination, destination_length, elements);
   } catch (const std::exception& exception) {
     std::cerr << exception.what() << std::endl;
-    return -1;
+    return 0;
   }
 }
 
