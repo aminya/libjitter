@@ -46,7 +46,7 @@ JitterBuffer::~JitterBuffer() {
   FreeVirtualMemory(buffer, max_size_bytes, vm_user_data);
 }
 
-std::size_t JitterBuffer::Enqueue(const std::vector<Packet> &packets, const ConcealmentCallback &concealment_callback, const ConcealmentCallback &free_callback) {
+std::size_t JitterBuffer::Enqueue(const std::vector<Packet> &packets, const ConcealmentCallback &concealment_callback) {
   std::size_t enqueued = 0;
 
   for (const Packet &packet: packets) {
@@ -57,29 +57,44 @@ std::size_t JitterBuffer::Enqueue(const std::vector<Packet> &packets, const Conc
       enqueued += Update(packet);
       continue;
     } else if (last_written_sequence_number.has_value() && packet.sequence_number != last_written_sequence_number) {
-     // TODO: We should check that there's enough space before we bother to ask for concealment packet generation.
      const std::size_t last = last_written_sequence_number.value();
      const std::size_t missing = packet.sequence_number - last - 1;
      if (missing > 0) {
-       std::cout << "Discontinuity detected. Last written was: " << last << " this is: " << packet.sequence_number << std::endl;
-       std::vector<Packet> concealment_packets = std::vector<Packet>(missing);
-       for (std::size_t sequence_offset = 0; sequence_offset < missing; sequence_offset++) {
-         concealment_packets[sequence_offset].sequence_number = last + sequence_offset + 1;
-         concealment_packets[sequence_offset].elements = packet_elements;
-         concealment_packets[sequence_offset].length = packet_elements * element_size;
+       std::cout << "Discontinuity detected. Last written was: " << last << " this is: " << packet.sequence_number << " need: " << missing << std::endl;
+       // Alter missing to be the smallest of the missing packets or what we can currently fit in the buffer.
+       const std::size_t space = max_size_bytes - written;
+       const std::size_t space_elements = space / (element_size + METADATA_SIZE);
+       const std::size_t to_conceal = std::min(missing, space_elements);
+       if (missing != to_conceal) {
+         std::cout << "Couldn't fit all missing. Asking for: " << to_conceal << "/" << missing << std::endl;
+       }
+       std::vector<Packet> concealment_packets = std::vector<Packet>(to_conceal);
+       for (std::size_t sequence_offset = 0; sequence_offset < to_conceal; sequence_offset++) {
+         // We need to write the header for this packet.
+         const std::int64_t now_ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+         Header header = {
+           .sequence_number = static_cast<uint32_t>(last + sequence_offset + 1),
+           .elements = packet_elements,
+           .timestamp = static_cast<uint64_t>(now_ms)
+         };
+         CopyIntoBuffer(reinterpret_cast<std::uint8_t*>(&header), METADATA_SIZE, true, 0);
+         write_offset = (write_offset + METADATA_SIZE) % max_size_bytes;
+         const std::size_t length = header.elements * element_size;
+         concealment_packets[sequence_offset] = {
+          .sequence_number = header.sequence_number,
+          .data = buffer + write_offset,
+          .length = length,
+          .elements = header.elements,
+         };
+         write_offset = (write_offset + length) % max_size_bytes;
        }
        concealment_callback(concealment_packets);
-       for (const Packet &concealment_packet: concealment_packets) {
-         if (concealment_packet.length == 0) continue;
-         const std::size_t enqueued_elements = CopyIntoBuffer(concealment_packet);
-         if (enqueued_elements == 0) {
-           // There's no more space.
-           break;
-         }
-         enqueued += enqueued_elements;
-         last_written_sequence_number = concealment_packet.sequence_number;
-       }
-       free_callback(concealment_packets);
+
+       // Now that we've finished providing data, update values for the reader.
+       written += to_conceal * ((packet_elements * element_size) + METADATA_SIZE);
+       written_elements += to_conceal * packet_elements;
+       last_written_sequence_number = last + to_conceal;
+       enqueued += packet_elements * to_conceal;
      }
    }
 
